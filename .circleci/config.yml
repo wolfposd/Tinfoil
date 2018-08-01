@@ -1,0 +1,10 @@
+version: 2
+jobs:
+  build:
+    docker:
+      - image: devkitpro/devkita64
+    steps:
+      - checkout
+      - run: make
+
+
