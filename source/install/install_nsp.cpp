@@ -12,8 +12,8 @@
 
 namespace tin::install::nsp
 {
-    NSPInstallTask::NSPInstallTask(tin::install::nsp::SimpleFileSystem& simpleFileSystem, FsStorageId destStorageId) :
-        IInstallTask(destStorageId), m_simpleFileSystem(&simpleFileSystem)
+    NSPInstallTask::NSPInstallTask(tin::install::nsp::SimpleFileSystem& simpleFileSystem, FsStorageId destStorageId, bool ignoreReqFirmVersion) :
+        IInstallTask(destStorageId), m_ignoreReqFirmVersion(ignoreReqFirmVersion), m_simpleFileSystem(&simpleFileSystem)
     {
 
     }
@@ -55,7 +55,10 @@ namespace tin::install::nsp
         *(u64*)m_cnmtContentRecord.size = cnmtNCASize & 0xFFFFFFFFFFFF;
         m_cnmtContentRecord.type = NcmContentType_CNMT;
 
-        ASSERT_OK(m_contentMeta.GetInstallContentMeta(&m_metaRecord, m_cnmtContentRecord, m_installContentMetaData), "Failed to get install content meta");
+        if (m_ignoreReqFirmVersion)
+            printf("WARNING: Required system firmware version is being IGNORED!\n");
+
+        ASSERT_OK(m_contentMeta.GetInstallContentMeta(&m_metaRecord, m_cnmtContentRecord, m_installContentMetaData, m_ignoreReqFirmVersion), "Failed to get install content meta");
 
         // Check NCA files are present
         // Check tik/cert is present
@@ -63,49 +66,72 @@ namespace tin::install::nsp
 
     void NSPInstallTask::Install()
     {
-        u64 baseTitleId = 0;
+        Result rc = 0;
         std::vector<ContentStorageRecord> storageRecords;
+        u64 baseTitleId = 0;
+        u32 contentMetaCount = 0;
 
+        // Updates and DLC don't share the same title id as the base game, but we
+        // should be able to derive it manually.
         if (m_metaRecord.type == static_cast<u8>(ContentMetaType::APPLICATION))
         {
             baseTitleId = m_metaRecord.titleId;
-
-            ContentStorageRecord appStorageRecord;
-            appStorageRecord.metaRecord = m_metaRecord;
-            appStorageRecord.storageId = FsStorageId_SdCard;
-
-            storageRecords.push_back(appStorageRecord);
         }
         else if (m_metaRecord.type == static_cast<u8>(ContentMetaType::PATCH))
         {
             baseTitleId = m_metaRecord.titleId ^ 0x800;
-
-            NcmContentMetaDatabase contentMetaDatabase;
-            ContentStorageRecord appStorageRecord;
-            appStorageRecord.storageId = FsStorageId_SdCard;
-            ContentStorageRecord patchStorageRecord;
-
-            ASSERT_OK(ncmOpenContentMetaDatabase(m_destStorageId, &contentMetaDatabase), "Failed to open content meta database");
-            ASSERT_OK(ncmContentMetaDatabaseGetLatestContentMetaKey(&contentMetaDatabase, baseTitleId, &appStorageRecord.metaRecord), "Failed to get latest application content meta key");
-
-            patchStorageRecord.metaRecord = m_metaRecord;
-            patchStorageRecord.storageId = FsStorageId_SdCard;
-            printBytes(nxlinkout, (u8*)&patchStorageRecord, sizeof(ContentStorageRecord), true);
-
-            storageRecords.push_back(appStorageRecord);
-            storageRecords.push_back(patchStorageRecord);
+        }
+        else if (m_metaRecord.type == static_cast<u8>(ContentMetaType::ADD_ON_CONTENT))
+        {
+            baseTitleId = (m_metaRecord.titleId ^ 0x1000) & ~0xFFF;
         }
 
-        printf("Pushing application record...\n");
+        // TODO: Make custom error with result code field
+        // 0x410: The record doesn't already exist
+        if (R_FAILED(rc = nsCountApplicationContentMeta(baseTitleId, &contentMetaCount)) && rc != 0x410)
+        {
+            throw std::runtime_error("Failed to count application content meta");
+        }
+        rc = 0;
 
-        // NOTE: HOS doesn't seem to do this, pushApplicationRecord typically *appends* content meta records, not sets?
+        LOG_DEBUG("Content meta count: %u\n", contentMetaCount);
+
+        // Obtain any existing app record content meta and append it to our vector
+        if (contentMetaCount > 0)
+        {
+            storageRecords.resize(contentMetaCount);
+            size_t contentStorageBufSize = contentMetaCount * sizeof(ContentStorageRecord);
+            auto contentStorageBuf = std::make_unique<ContentStorageRecord[]>(contentMetaCount);
+            u32 entriesRead;
+
+            ASSERT_OK(nsListApplicationRecordContentMeta(0, baseTitleId, contentStorageBuf.get(), contentStorageBufSize, &entriesRead), "Failed to list application record content meta");
+
+            if (entriesRead != contentMetaCount)
+            {
+                throw std::runtime_error("Mismatch between entries read and content meta count");
+            }
+
+            memcpy(storageRecords.data(), contentStorageBuf.get(), contentStorageBufSize);
+        }
+
+        // Add our new content meta
+        ContentStorageRecord storageRecord;
+        storageRecord.metaRecord = m_metaRecord;
+        storageRecord.storageId = m_destStorageId;
+        storageRecords.push_back(storageRecord);
+
+        // Replace the existing application records with our own
         try
         {
             nsDeleteApplicationRecord(baseTitleId);
         }
         catch (...) {}
 
+        printf("Pushing application record...\n");
         ASSERT_OK(nsPushApplicationRecord(baseTitleId, 0x3, storageRecords.data(), storageRecords.size() * sizeof(ContentStorageRecord)), "Failed to push application record");
+
+        printf("Writing content records...\n");
+        this->WriteRecords();
 
         printf("Installing CNNT NCA...\n");
         this->InstallNCA(m_cnmtContentRecord.ncaId);
@@ -115,9 +141,6 @@ namespace tin::install::nsp
         {
             this->InstallNCA(record.ncaId);
         }
-
-        printf("Writing content records...\n");
-        this->WriteRecords();
 
         printf("Installing ticket and cert...\n");
         try
@@ -152,7 +175,7 @@ namespace tin::install::nsp
         LOG_DEBUG("NcaId: %s\n", ncaName.c_str());
         LOG_DEBUG("Dest storage Id: %u\n", m_destStorageId);
 
-        nx::ncm::ContentStorage contentStorage(FsStorageId_SdCard);
+        nx::ncm::ContentStorage contentStorage(m_destStorageId);
 
         // Attempt to delete any leftover placeholders
         try
@@ -267,15 +290,21 @@ namespace tin::install::nsp
         if (m_metaRecord.type == static_cast<u8>(ContentMetaType::APPLICATION))
         {
             baseTitleId = m_metaRecord.titleId;
-            updateTitleId = baseTitleId ^ 0x800;
+            
         }
         else if (m_metaRecord.type == static_cast<u8>(ContentMetaType::PATCH))
         {
             updateTitleId = m_metaRecord.titleId;
             baseTitleId = updateTitleId ^ 0x800;
         }
+        else if (m_metaRecord.type == static_cast<u8>(ContentMetaType::ADD_ON_CONTENT))
+        {
+            baseTitleId = (m_metaRecord.titleId ^ 0x1000) & ~0xFFF;
+        }
         else
             return;
+
+        updateTitleId = baseTitleId ^ 0x800;
 
         try
         {
@@ -350,46 +379,4 @@ namespace tin::install::nsp
 
         #endif
     }
-}
-
-Result installTitle(InstallContext *context)
-{
-    try
-    {
-        if (context->sourceType == InstallSourceType_Nsp)
-        {
-            std::string fullPath = "@Sdcard:/" + std::string(context->path);
-            nx::fs::IFileSystem fileSystem;
-            ASSERT_OK(fileSystem.OpenFileSystemWithId(fullPath, FsFileSystemType_ApplicationPackage, 0), "Failed to open application package file system");
-            tin::install::nsp::SimpleFileSystem simpleFS(fileSystem, "/", fullPath + "/");
-            tin::install::nsp::NSPInstallTask task(simpleFS, FsStorageId_SdCard);
-
-            task.PrepareForInstall();
-            LOG_DEBUG("Pre Install Records: \n");
-            task.DebugPrintInstallData();
-            task.Install();
-
-            return 0;
-        }
-        else if (context->sourceType == InstallSourceType_Extracted)
-        {
-            std::string fullPath = "@Sdcard:/" + std::string(context->path);
-            nx::fs::IFileSystem fileSystem;
-            ASSERT_OK(fileSystem.OpenSdFileSystem(), "Failed to open SD file system");
-            tin::install::nsp::SimpleFileSystem simpleFS(fileSystem, context->path, fullPath);
-            tin::install::nsp::NSPInstallTask task(simpleFS, FsStorageId_SdCard);
-
-            task.PrepareForInstall();
-            task.Install();
-
-            return 0;
-        }
-    }
-    catch (std::exception& e)
-    {
-        LOG_DEBUG("%s", e.what());
-        fprintf(stdout, "%s", e.what());
-    }
-
-    return 0xDEAD;
 }

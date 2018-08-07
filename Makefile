@@ -32,14 +32,13 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET      := $(notdir $(CURDIR))
 BUILD       := build
-SOURCES     := source source/install source/ipc source/lib source/ui source/nx source/nx/ipc
+SOURCES     := source source/install source/ipc source/lib source/ui source/nx source/nx/ipc source/util
 DATA        := data
 INCLUDES    := include
 EXEFS_SRC   := exefs_src
 APP_TITLE   := tinfoil
 APP_AUTHOR  := Adubbz
 APP_VERSION := 0.0.1
-ICON        := icon.jpg
 
 #ROMFS	:=	romfs
 
@@ -62,7 +61,7 @@ CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 
-CXXFLAGS	:= $(CFLAGS) -fno-rtti -std=gnu++17
+CXXFLAGS	:= $(CFLAGS) -std=gnu++17
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
