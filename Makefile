@@ -39,6 +39,7 @@ EXEFS_SRC   := exefs_src
 APP_TITLE   := tinfoil
 APP_AUTHOR  := Adubbz
 APP_VERSION := 0.0.1
+ICON        := icon.jpg
 
 #ROMFS	:=	romfs
 
