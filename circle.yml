@@ -9,8 +9,8 @@ jobs:
       - run: make
       - run: mkdir -p switch/tinfoil/
       - run: mkdir zip
-      - run: cp project.nro switch/tinfoil/tinfoil.nro
-      - run: cp project.nacp switch/tinfoil/tinfoil.nacp
+      - run: cp tinfoil.nro switch/tinfoil/tinfoil.nro
+      - run: cp tinfoil.nacp switch/tinfoil/tinfoil.nacp
       - run: zip -r zip/tinfoil_${CIRCLE_BUILD_NUM}.zip switch
       - store_artifacts:
           path: zip/
